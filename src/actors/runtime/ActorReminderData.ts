@@ -185,6 +185,6 @@ export default class ActorReminderData {
 
     const deserializedData = serializer.deserialize(data);
 
-    return new ActorReminderData(reminderName, dueTime, ttl, period, deserializedData);
+    return new ActorReminderData(reminderName, dueTime, period, ttl, deserializedData);
   }
 }
