@@ -13,9 +13,31 @@ limitations under the License.
 
 import AbstractActor from "./AbstractActor";
 
+/**
+ * Facade for actor state management, providing high-level access to state operations.
+ *
+ * StateManager is a placeholder that may be extended in future versions to provide
+ * additional state management functionality. Currently, state operations are primarily
+ * handled through {@link ActorStateManager}.
+ *
+ * @remarks
+ * The StateManager abstracts the relationship between an actor instance and its
+ * state management capabilities. It holds a reference to the actor to enable
+ * state operations within the actor's lifecycle context.
+ *
+ * @internal
+ */
 export default class StateManager {
+  /**
+   * Reference to the actor instance.
+   */
   actor: AbstractActor;
 
+  /**
+   * Constructs a StateManager instance.
+   *
+   * @param actor - The actor instance for which to manage state.
+   */
   constructor(actor: AbstractActor) {
     this.actor = actor;
 
