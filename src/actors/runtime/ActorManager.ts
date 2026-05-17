@@ -20,21 +20,61 @@ import ActorTimerData from "./ActorTimerData";
 import BufferSerializer from "./BufferSerializer";
 
 /**
- * The Actor Manager manages actor objects of a specific actor type
+ * Manages instances of a specific actor type.
+ *
+ * ActorManager handles actor lifecycle (creation, activation, deactivation), method invocation,
+ * and reminder/timer dispatch for a single actor type. It maintains a cache of active actor
+ * instances and routes incoming requests to the appropriate actor instance.
+ *
+ * @remarks
+ * - Actors are lazily activated on first access
+ * - Active actors are cached by ID for efficient reuse
+ * - All method invocations go through pre/post hooks for state management
+ * - Reminders and timers are dispatched through the standard method invocation path
+ *
+ * **Known Limitations** (marked as @todo in code):
+ * - Race condition protection for concurrent access not yet implemented
+ * - Reentrancy checks not yet implemented
+ *
+ * @template T - The actor type managed by this manager, must extend {@link AbstractActor}.
+ *
+ * @internal
  */
 const REMINDER_METHOD_NAME = "receiveReminder"; // the callback method name for the reminder
 
 export default class ActorManager<T extends AbstractActor> {
+  /**
+   * The actor class constructor for this manager.
+   */
   readonly actorCls: Class<T>;
+
+  /**
+   * The Dapr client used for actor operations.
+   */
   readonly daprClient: DaprClient;
+
+  /**
+   * Serializer for buffer/object conversions.
+   *
+   * @internal
+   */
   readonly serializer: BufferSerializer = new BufferSerializer();
 
+  /**
+   * Map of active actor instances, keyed by actor ID string.
+   */
   actors: Map<string, T>;
 
   // dispatcher: ActorMethodDispatcher<T>;
   // timerMethodContext: any;
   // reminderMethodContext: any;
 
+  /**
+   * Constructs an ActorManager for the given actor type.
+   *
+   * @param actorCls - The actor class to manage.
+   * @param daprClient - The Dapr client for operations.
+   */
   constructor(actorCls: Class<T>, daprClient: DaprClient) {
     this.daprClient = daprClient;
     this.actorCls = actorCls;
@@ -57,10 +97,27 @@ export default class ActorManager<T extends AbstractActor> {
     // this.reminderMethodContext = ActorMethodContext.createForReminder(REMINDER_METHOD_NAME);
   }
 
+  /**
+   * Creates a new actor instance without adding it to the cache.
+   *
+   * @param actorId - The actor identifier.
+   * @returns A new actor instance.
+   *
+   * @internal
+   */
   async createActor(actorId: ActorId): Promise<T> {
     return new this.actorCls(this.daprClient, actorId);
   }
 
+  /**
+   * Activates an actor, calling its onActivate lifecycle hook.
+   *
+   * Creates the actor instance, calls onActivateInternal(), and caches it by ID.
+   *
+   * @param actorId - The actor identifier.
+   *
+   * @internal
+   */
   async activateActor(actorId: ActorId): Promise<void> {
     const actor = await this.createActor(actorId);
 
@@ -71,6 +128,14 @@ export default class ActorManager<T extends AbstractActor> {
     this.actors.set(actorId.getId(), actor);
   }
 
+  /**
+   * Deactivates an actor, calling its onDeactivate lifecycle hook and removing from cache.
+   *
+   * @param actorId - The actor identifier.
+   * @throws Error if the actor is not currently active.
+   *
+   * @internal
+   */
   async deactivateActor(actorId: ActorId): Promise<void> {
     if (!this.actors.has(actorId.getId())) {
       throw new Error(
@@ -87,6 +152,17 @@ export default class ActorManager<T extends AbstractActor> {
     this.actors.delete(actorId.getId());
   }
 
+  /**
+   * Gets an active actor instance, activating if needed (lazy activation).
+   *
+   * If the actor is not in the cache, activates it first.
+   *
+   * @param actorId - The actor identifier.
+   * @returns The active actor instance.
+   * @throws Error if activation fails.
+   *
+   * @internal
+   */
   async getActiveActor(actorId: ActorId): Promise<T> {
     if (!this.actors.has(actorId.getId())) {
       await this.activateActor(actorId);
@@ -102,19 +178,36 @@ export default class ActorManager<T extends AbstractActor> {
   }
 
   /**
-   * Execute the given method with requestBody on the given Actor
+   * Invokes a method on an actor with deserialized parameters.
    *
-   * @param actorId
-   * @param actorMethodName
-   * @param requestBody
-   * @param actorMethodContext
-   * @returns
+   * Deserializes the request buffer, calls the method via callActorMethod, and returns
+   * the result. Automatically handles pre/post method hooks for state management.
+   *
+   * @param actorId - The actor identifier.
+   * @param actorMethodName - The method name to invoke.
+   * @param requestBody - Optional serialized request data.
+   * @returns The method result.
+   * @throws Error if the method does not exist or invocation fails.
+   *
+   * @internal
    */
   async invoke(actorId: ActorId, actorMethodName: string, requestBody?: Buffer): Promise<any> {
     const requestBodyDeserialized = this.serializer.deserialize(requestBody || Buffer.from(""));
     return await this.callActorMethod(actorId, actorMethodName, requestBodyDeserialized);
   }
 
+  /**
+   * Fires a persistent reminder on an actor.
+   *
+   * Deserializes the reminder data, reconstructs the ActorReminderData, and invokes
+   * the receiveReminder method with the reminder state.
+   *
+   * @param actorId - The actor identifier.
+   * @param reminderName - The reminder name.
+   * @param requestBody - Serialized reminder data.
+   *
+   * @internal
+   */
   async fireReminder(actorId: ActorId, reminderName: string, requestBody?: Buffer): Promise<void> {
     // @todo: make sure we are remindable
     const requestBodyDeserialized = this.serializer.deserialize(requestBody || Buffer.from(""));
@@ -122,6 +215,18 @@ export default class ActorManager<T extends AbstractActor> {
     await this.callActorMethod(actorId, REMINDER_METHOD_NAME, reminderData.state);
   }
 
+  /**
+   * Fires an ephemeral timer on an actor.
+   *
+   * Deserializes the timer data, reconstructs the ActorTimerData, and invokes
+   * the callback method with the timer state.
+   *
+   * @param actorId - The actor identifier.
+   * @param timerName - The timer name.
+   * @param requestBody - Serialized timer data.
+   *
+   * @internal
+   */
   async fireTimer(actorId: ActorId, timerName: string, requestBody?: Buffer): Promise<void> {
     // @todo: make sure we are remindable
     const requestBodyDeserialized = this.serializer.deserialize(requestBody || Buffer.from(""));
@@ -129,6 +234,20 @@ export default class ActorManager<T extends AbstractActor> {
     await this.callActorMethod(actorId, timerData.callback, timerData.state);
   }
 
+  /**
+   * Calls an actor method with arguments, handling lifecycle hooks and state management.
+   *
+   * Validates the method exists, invokes pre-hook, calls the method (spreading array args),
+   * invokes post-hook (which persists state), and returns the result.
+   *
+   * @param actorId - The actor identifier.
+   * @param actorMethodName - The method name to invoke.
+   * @param args - Method arguments (can be a single value or array for spreading).
+   * @returns The method result as a Buffer.
+   * @throws Error if the method does not exist or invocation fails.
+   *
+   * @internal
+   */
   async callActorMethod(actorId: ActorId, actorMethodName: string, args: any): Promise<Buffer> {
     const actorObject = await this.getActiveActor(actorId);
 
@@ -159,8 +278,10 @@ export default class ActorManager<T extends AbstractActor> {
       res = await actorObject[actorMethodName](args);
     }
 
+    // Invoke post-hook (which persists state changes made during the method)
     await actorObject.onActorMethodPostInternal();
 
-    return res;
+    // Return the result serialized as a Buffer
+    return this.serializer.serialize(res);
   }
 }
